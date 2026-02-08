@@ -1,16 +1,30 @@
 # Stage 1: Builder
-# We use this stage to prepare files. 
-# In a real-world app, you might run 'composer install' or build frontend assets here.
 FROM php:8.2-cli as builder
+
+# Install unzip and git (needed for composer)
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    libpq-dev \
+    && docker-php-ext-install pdo pdo_pgsql
+
+# Install Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 COPY . .
 
+# Install dependencies
+RUN composer install --no-dev --optimize-autoloader
+
 # Stage 2: Production
 FROM php:8.2-apache
 
-# Enable mod_rewrite
-RUN a2enmod rewrite
+# Install runtime dependencies (Postgres driver)
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    && docker-php-ext-install pdo pdo_pgsql \
+    && a2enmod rewrite
 
 # Set working directory
 WORKDIR /var/www/html

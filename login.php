@@ -1,21 +1,22 @@
 <?php
 session_start();
-
-$usersFile = __DIR__ . '/users.json';
-$users = file_exists($usersFile) ? json_decode(file_get_contents($usersFile), true) : [];
+require __DIR__ . '/db.php';
 
 // Check for "Remember Me" cookie
 if (!isset($_SESSION['user']) && isset($_COOKIE['remember_token'])) {
     $token = $_COOKIE['remember_token'];
-    foreach ($users as $username => $userData) {
-        if (isset($userData['remember_token']) && $userData['remember_token'] === $token) {
-            $_SESSION['user'] = $username;
-            header('Location: profile.php');
-            exit;
-        }
+    $stmt = $pdo->prepare("SELECT username FROM users WHERE remember_token = ?");
+    $stmt->execute([$token]);
+    $user = $stmt->fetch();
+
+    if ($user) {
+        $_SESSION['user'] = $user['username'];
+        header('Location: profile.php');
+        exit;
+    } else {
+        // Invalid token, clear the cookie
+        setcookie('remember_token', '', time() - 3600, '/');
     }
-    // Invalid token, clear the cookie
-    setcookie('remember_token', '', time() - 3600, '/');
 }
 
 // If already logged in, redirect to profile
@@ -25,6 +26,8 @@ if (isset($_SESSION['user'])) {
 }
 
 $error = '';
+$username = '';
+$password = '';
 
 // Get flash message
 $flash = $_SESSION['flash'] ?? null;
@@ -36,18 +39,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = $_POST['password'] ?? '';
     $remember = isset($_POST['remember']);
 
-    // Reload users (in case of concurrent changes)
-    $users = file_exists($usersFile) ? json_decode(file_get_contents($usersFile), true) : [];
-
     // Check credentials
-    if (isset($users[$username]) && password_verify($password, $users[$username]['password'])) {
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
+    $stmt->execute([$username]);
+    $user = $stmt->fetch();
+
+    if ($user && password_verify($password, $user['password'])) {
         $_SESSION['user'] = $username;
 
         // Handle "Remember Me"
         if ($remember) {
             $token = bin2hex(random_bytes(32));
-            $users[$username]['remember_token'] = $token;
-            file_put_contents($usersFile, json_encode($users, JSON_PRETTY_PRINT));
+            $updateStmt = $pdo->prepare("UPDATE users SET remember_token = ? WHERE id = ?");
+            $updateStmt->execute([$token, $user['id']]);
+            
             setcookie('remember_token', $token, time() + (30 * 24 * 60 * 60), '/'); // 30 days
         }
 
@@ -77,16 +82,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             margin: 10px 0;
             box-sizing: border-box;
         }
-        button {
+        form > button[type="submit"].btn-primary {
             width: 100%;
             padding: 12px;
             background: #007bff;
             color: white;
             border: none;
             cursor: pointer;
+            margin-top: 10px;
         }
         button:hover {
-            background: #0056b3;
+            opacity: 0.9;
         }
         .error {
             background: #f8d7da;
@@ -129,13 +135,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <?php endif; ?>
 
     <form method="POST">
-        <input type="text" name="username" placeholder="Username" required>
-        <input type="password" name="password" placeholder="Password" required>
+        <input type="text" name="username" placeholder="Username" value="<?= htmlspecialchars($username) ?>" required>
+        <input type="password" name="password" id="password" placeholder="Password" required>
+
         <div class="remember-row">
-            <input type="checkbox" name="remember" id="remember">
+            <input type="checkbox" name="remember" id="remember" <?= isset($_POST['remember']) ? 'checked' : '' ?>>
             <label for="remember">Remember Me</label>
         </div>
-        <button type="submit">Login</button>
+        <button type="submit" name="action" value="login" class="btn-primary">Login</button>
     </form>
 
     <p>Don't have an account? <a href="register.php">Register</a></p>

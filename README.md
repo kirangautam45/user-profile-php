@@ -329,3 +329,34 @@ Good luck!
 2. Connect your repository to Railway.
 3. Railway will auto-detect the `Dockerfile` and deploy.
    > **Note:** Since this app uses a local `users.json` file, data will be lost on every redeploy unless you configure a persistent volume or switch to a database.
+
+## Supabase Migration
+
+The project is configured to use Supabase (PostgreSQL + Storage).
+
+### 1. Environment Variables
+Create a `.env` file (or set Railway variables) with:
+```bash
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-or-service-key
+# Optional (if not using standard connection logic):
+# DATABASE_URL=postgres://postgres...
+```
+
+### 2. Database Schema
+Run this SQL in your Supabase SQL Editor:
+```sql
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    profile_pic TEXT,
+    remember_token TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### 3. Storage
+Create a public storage bucket named `avatars`.
+

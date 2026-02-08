@@ -1,5 +1,7 @@
 <?php
 session_start();
+require __DIR__ . '/db.php';
+require_once __DIR__ . '/SupabaseStorage.php';
 
 // If already logged in, redirect to profile
 if (isset($_SESSION['user'])) {
@@ -9,77 +11,64 @@ if (isset($_SESSION['user'])) {
 
 $error = '';
 
+
 // Handle form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = trim($_POST['username'] ?? '');
     $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
-    $confirm = $_POST['confirm'] ?? '';
+    $confirm_password = $_POST['confirm'] ?? '';
 
-    // Load existing users
-    $usersFile = __DIR__ . '/users.json';
-    $users = file_exists($usersFile) ? json_decode(file_get_contents($usersFile), true) : [];
+        // Validation
+        if (empty($username) || empty($email) || empty($password)) {
+            $error = 'All fields are required!';
+        } elseif ($password !== $confirm_password) {
+            $error = 'Passwords do not match!';
+        } elseif (strlen($password) < 6) {
+            $error = 'Password must be at least 6 characters.';
+        } else {
+            // Check if user exists (Postgres)
+            $stmt = $pdo->prepare("SELECT id FROM users WHERE username = ? OR email = ?");
+            $stmt->execute([$username, $email]);
+            
+            if ($stmt->rowCount() > 0) {
+                $error = 'Username or Email already exists!';
+            } else {
+                // Handle File Upload
+                $profile_pic = null;
+                if (isset($_FILES['profile_pic']) && $_FILES['profile_pic']['error'] === 0) {
+                    $allowed = ['jpg', 'jpeg', 'png', 'gif'];
+                    $ext = strtolower(pathinfo($_FILES['profile_pic']['name'], PATHINFO_EXTENSION));
 
-    // Validation
-    if (empty($username)) {
-        $error = 'Username is required!';
-    } elseif (strpos($username, ' ') !== false) {
-        $error = 'Username cannot contain spaces!';
-    } elseif (isset($users[$username])) {
-        $error = 'Username already exists!';
-    } elseif (empty($email)) {
-        $error = 'Email is required!';
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $error = 'Please enter a valid email address!';
-    } elseif (strlen($password) < 6) {
-        $error = 'Password must be at least 6 characters!';
-    } elseif ($password !== $confirm) {
-        $error = 'Passwords do not match!';
-    } else {
-        // Check if email already exists
-        foreach ($users as $existingUser) {
-            if (isset($existingUser['email']) && strtolower($existingUser['email']) === strtolower($email)) {
-                $error = 'Email already registered!';
-                break;
-            }
-        }
+                    if (in_array($ext, $allowed)) {
+                        $filename = $username . '_' . time() . '.' . $ext;
+                        // Upload to Supabase Storage
+                        $storage = new SupabaseStorage();
+                        if ($storage->upload($_FILES['profile_pic']['tmp_name'], $filename)) {
+                            $profile_pic = $filename;
+                        } else {
+                            $error = 'Failed to upload image to storage.';
+                        }
+                    } else {
+                        $error = 'Invalid file type!';
+                    }
+                }
 
-        if (empty($error)) {
-            $profilePic = '';
-
-            // Handle profile picture upload
-            if (isset($_FILES['profile_pic']) && $_FILES['profile_pic']['error'] === UPLOAD_ERR_OK) {
-                $allowed = ['jpg', 'jpeg', 'png', 'gif'];
-                $extension = strtolower(pathinfo($_FILES['profile_pic']['name'], PATHINFO_EXTENSION));
-
-                if (!in_array($extension, $allowed)) {
-                    $error = 'Only JPG, PNG, GIF allowed!';
-                } elseif ($_FILES['profile_pic']['size'] > 2097152) {
-                    $error = 'File too large! Max 2MB.';
-                } else {
-                    $profilePic = $username . '_' . time() . '.' . $extension;
-                    if (!move_uploaded_file($_FILES['profile_pic']['tmp_name'], __DIR__ . '/uploads/' . $profilePic)) {
-                        $error = 'Failed to save profile picture. Check folder permissions.';
+                if (!$error) {
+                    // Insert User
+                    $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                    $stmt = $pdo->prepare("INSERT INTO users (username, email, password, profile_pic) VALUES (?, ?, ?, ?)");
+                    
+                    if ($stmt->execute([$username, $email, $hashed_password, $profile_pic])) {
+                        $_SESSION['flash'] = ['type' => 'success', 'message' => 'Registration successful! Please login.'];
+                        header('Location: login.php');
+                        exit;
+                    } else {
+                        $error = 'Registration failed due to a database error.';
                     }
                 }
             }
-
-            // If no error, save user
-            if (empty($error)) {
-                $users[$username] = [
-                    'password' => password_hash($password, PASSWORD_DEFAULT),
-                    'email' => $email,
-                    'profile_pic' => $profilePic,
-                    'created_at' => date('Y-m-d')
-                ];
-                file_put_contents($usersFile, json_encode($users, JSON_PRETTY_PRINT));
-
-                $_SESSION['flash'] = ['type' => 'success', 'message' => 'Registration successful! Please login.'];
-                header('Location: login.php');
-                exit;
-            }
         }
-    }
 }
 ?>
 <!DOCTYPE html>
@@ -104,16 +93,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         input[type="file"] {
             margin: 10px 0;
         }
-        button {
+        form > button[type="submit"].register-btn {
             width: 100%;
             padding: 12px;
             background: #28a745;
             color: white;
             border: none;
             cursor: pointer;
+            margin-top: 10px;
         }
         button:hover {
-            background: #218838;
+            opacity: 0.9;
         }
         .error {
             background: #f8d7da;
@@ -137,13 +127,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <?php endif; ?>
 
     <form method="POST" enctype="multipart/form-data">
+
+
         <input type="text" name="username" placeholder="Username" value="<?= htmlspecialchars($_POST['username'] ?? '') ?>" required>
         <input type="email" name="email" placeholder="Email" value="<?= htmlspecialchars($_POST['email'] ?? '') ?>" required>
-        <input type="password" name="password" placeholder="Password (min 6 chars)" required>
-        <input type="password" name="confirm" placeholder="Confirm Password" required>
+        
+        <input type="password" name="password" id="password" placeholder="Password (min 6 chars)" value="<?= htmlspecialchars($password) ?>" required>
+
+        <input type="password" name="confirm" id="confirm" placeholder="Confirm Password" value="<?= htmlspecialchars($confirm_password) ?>" required>
+
         <label>Profile Picture (optional):</label>
         <input type="file" name="profile_pic" accept="image/*">
-        <button type="submit">Register</button>
+        <button type="submit" class="register-btn">Register</button>
     </form>
 
     <p>Already have an account? <a href="login.php">Login</a></p>

@@ -1,5 +1,12 @@
 <?php
 session_start();
+require __DIR__ . '/db.php';
+// SupabaseStorage is autoloaded via composer or needs to be included if not. 
+// Assuming it's in the root or autoloaded. Based on register.php usage, let's include it if class not exists, just to be safe, or assume autoload.
+// However, register.php didn't explicit include, but db.php requires vendor/autoload. If SupabaseStorage is not in namespace/composer, we might need to require it.
+// Checking file listing, SupabaseStorage.php is in root. Composer autoload usually maps src. 
+// Let's add require just in case, similar to how we might need it if not autoloaded.
+require_once __DIR__ . '/SupabaseStorage.php';
 
 // Check if logged in
 if (!isset($_SESSION['user'])) {
@@ -9,10 +16,17 @@ if (!isset($_SESSION['user'])) {
 
 $username = $_SESSION['user'];
 
-// Load user data
-$usersFile = __DIR__ . '/users.json';
-$users = json_decode(file_get_contents($usersFile), true);
-$user = $users[$username];
+// Fetch user data from DB
+$stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
+$stmt->execute([$username]);
+$user = $stmt->fetch();
+
+if (!$user) {
+    // Should not happen if logged in, but handle safety
+    session_destroy();
+    header('Location: login.php');
+    exit;
+}
 
 $error = '';
 $success = '';
@@ -28,26 +42,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_info'])) {
         $error = 'Please enter a valid email address.';
     } elseif (!preg_match('/^[a-zA-Z0-9_]+$/', $newUsername)) {
         $error = 'Username can only contain letters, numbers, and underscores.';
-    } elseif ($newUsername !== $username && isset($users[$newUsername])) {
-        $error = 'Username already taken.';
     } else {
-        // Update email
-        $users[$username]['email'] = $newEmail;
-
-        // Handle username change
-        if ($newUsername !== $username) {
-            $users[$newUsername] = $users[$username];
-            unset($users[$username]);
-            $_SESSION['user'] = $newUsername;
-            $username = $newUsername;
+        // Check availability if changed
+        $checkStmt = $pdo->prepare("SELECT id FROM users WHERE (username = ? OR email = ?) AND id != ?");
+        $checkStmt->execute([$newUsername, $newEmail, $user['id']]);
+        
+        if ($checkStmt->rowCount() > 0) {
+            $error = 'Username or Email already taken.';
+        } else {
+            // Update DB
+            $updateStmt = $pdo->prepare("UPDATE users SET username = ?, email = ? WHERE id = ?");
+            if ($updateStmt->execute([$newUsername, $newEmail, $user['id']])) {
+                // Update session if username changed
+                if ($newUsername !== $username) {
+                    $_SESSION['user'] = $newUsername;
+                    $username = $newUsername;
+                }
+                
+                // Refresh $user data
+                $user['username'] = $newUsername;
+                $user['email'] = $newEmail;
+                
+                $_SESSION['flash'] = ['type' => 'success', 'message' => 'Profile updated successfully!'];
+                header('Location: profile.php');
+                exit;
+            } else {
+                $error = 'Failed to update profile.';
+            }
         }
-
-        file_put_contents($usersFile, json_encode($users, JSON_PRETTY_PRINT));
-        $user = $users[$username];
-
-        $_SESSION['flash'] = ['type' => 'success', 'message' => 'Profile updated successfully!'];
-        header('Location: profile.php');
-        exit;
     }
 }
 
@@ -59,55 +81,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['profile_pic']) && $_
 
         if (!in_array($extension, $allowed)) {
             $error = 'Only JPG, PNG, GIF allowed!';
-        } elseif ($_FILES['profile_pic']['size'] > 2097152) {
-            $error = 'File too large! Max 2MB.';
+        } elseif ($_FILES['profile_pic']['size'] > 5242880) { // 5MB limit
+            $error = 'File too large! Max 5MB.';
         } else {
-            // Delete old profile picture if exists
-            if (!empty($user['profile_pic'])) {
-                $oldPicPath = __DIR__ . '/uploads/' . $user['profile_pic'];
-                if (file_exists($oldPicPath)) {
-                    unlink($oldPicPath);
+            $filename = $username . '_' . time() . '.' . $extension;
+            
+            // Upload to Supabase Storage
+            $storage = new SupabaseStorage();
+            if ($storage->upload($_FILES['profile_pic']['tmp_name'], $filename)) {
+                
+                // Update DB with new filename
+                $picStmt = $pdo->prepare("UPDATE users SET profile_pic = ? WHERE id = ?");
+                if ($picStmt->execute([$filename, $user['id']])) {
+                    $user['profile_pic'] = $filename;
+                    $_SESSION['flash'] = ['type' => 'success', 'message' => 'Profile picture updated successfully!'];
+                    header('Location: profile.php');
+                    exit;
+                } else {
+                    $error = 'Database update failed.';
                 }
-            }
-
-            // Save new profile picture
-            $newPic = $username . '_' . time() . '.' . $extension;
-            if (move_uploaded_file($_FILES['profile_pic']['tmp_name'], __DIR__ . '/uploads/' . $newPic)) {
-                // Update user data
-                $users[$username]['profile_pic'] = $newPic;
-                file_put_contents($usersFile, json_encode($users, JSON_PRETTY_PRINT));
-                $user = $users[$username];
-
-                $_SESSION['flash'] = ['type' => 'success', 'message' => 'Profile picture updated successfully!'];
-                header('Location: profile.php');
-                exit;
             } else {
-                $error = 'Failed to move uploaded file. Check folder permissions.';
+                $error = 'Failed to upload image to Supabase Storage.';
             }
         }
     } else {
-        // Handle specific error codes
-        switch ($_FILES['profile_pic']['error']) {
-            case UPLOAD_ERR_INI_SIZE:
-            case UPLOAD_ERR_FORM_SIZE:
-                $error = 'File too large! Max 2MB.';
-                break;
-            case UPLOAD_ERR_PARTIAL:
-                $error = 'File was only partially uploaded.';
-                break;
-            case UPLOAD_ERR_NO_TMP_DIR:
-                $error = 'Missing a temporary folder.';
-                break;
-            case UPLOAD_ERR_CANT_WRITE:
-                $error = 'Failed to write file to disk.';
-                break;
-            case UPLOAD_ERR_EXTENSION:
-                $error = 'A PHP extension stopped the file upload.';
-                break;
-            default:
-                $error = 'Error uploading file. Error code: ' . $_FILES['profile_pic']['error'];
-                break;
-        }
+        $error = 'Upload error code: ' . $_FILES['profile_pic']['error'];
     }
 }
 
@@ -240,8 +238,11 @@ unset($_SESSION['flash']);
             <div class="error"><?= htmlspecialchars($error) ?></div>
         <?php endif; ?>
 
-        <?php if (!empty($user['profile_pic'])): ?>
-            <img src="uploads/<?= htmlspecialchars($user['profile_pic']) ?>" class="profile-pic" alt="Profile Picture">
+        <?php if (!empty($user['profile_pic'])): 
+            $storage = new SupabaseStorage();
+            $picUrl = $storage->getUrl($user['profile_pic']);
+        ?>
+            <img src="<?= htmlspecialchars($picUrl) ?>" class="profile-pic" alt="Profile Picture">
         <?php else: ?>
             <div class="no-pic">No Photo</div>
         <?php endif; ?>
