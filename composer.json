@@ -1,9 +1,0 @@
-{
-  "name": "kirangautam45/user-profile",
-  "description": "Simple PHP Profile System",
-  "require": {
-    "php": "^8.1",
-    "ext-pdo": "*",
-    "ext-pdo_pgsql": "*"
-  }
-}
